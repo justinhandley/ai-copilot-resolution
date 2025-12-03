@@ -1,0 +1,25 @@
+# Development files
+.git
+.gitignore
+.idea/
+.vscode/
+
+# Runtime files
+.copilot-review-*.md
+.copilot-review-*.json
+.copilot-review-*.log
+
+# Testing
+test/
+*.test.js
+coverage/
+
+# Documentation source
+docs/
+
+# CI/CD
+.github/
+
+# Misc
+*.log
+npm-debug.log*

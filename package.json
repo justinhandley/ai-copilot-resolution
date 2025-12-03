@@ -1,0 +1,40 @@
+{
+  "name": "ai-copilot-resolution",
+  "version": "1.0.0",
+  "description": "Claude Code tool for automated GitHub Copilot comment review and resolution",
+  "main": "index.js",
+  "bin": {
+    "copilot-review": "./bin/copilot-review.js",
+    "copilot-setup": "./bin/copilot-setup.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "github",
+    "copilot",
+    "claude-code",
+    "code-review",
+    "automation",
+    "pull-request",
+    "ai"
+  ],
+  "author": "Justin Handley",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "files": [
+    "bin/",
+    "docs/",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justinhandley/ai-copilot-resolution.git"
+  },
+  "bugs": {
+    "url": "https://github.com/justinhandley/ai-copilot-resolution/issues"
+  },
+  "homepage": "https://github.com/justinhandley/ai-copilot-resolution#readme"
+}
