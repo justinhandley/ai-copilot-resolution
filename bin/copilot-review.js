@@ -137,11 +137,18 @@ class CopilotReviewCommand {
 
       const comments = JSON.parse(stdout)
 
-      // Filter for Copilot comments (from github-actions[bot] or containing "Copilot")
+      // Filter for Copilot comments
+      // Copilot can appear as: "Copilot", "copilot", "github-actions[bot]", "copilot-pull-request-reviewer[bot]"
       const copilotComments = comments.filter(comment => {
+        const login = comment.user?.login || ''
+        const loginLower = login.toLowerCase()
+
         return (
-          comment.user?.login === 'github-actions[bot]' ||
-          comment.user?.login === 'copilot' ||
+          login === 'Copilot' ||
+          loginLower === 'copilot' ||
+          login === 'github-actions[bot]' ||
+          login === 'copilot-pull-request-reviewer[bot]' ||
+          loginLower.includes('copilot') ||
           (comment.body && comment.body.includes('Copilot'))
         )
       })
@@ -255,11 +262,11 @@ I will automatically:
     this.log(`💬 Replying to comment ${commentId}...`)
 
     try {
-      // Correct REST API: POST a new review comment as a reply
-      // Use the in_reply_to field to thread it properly
+      // CORRECT GitHub API endpoint for replying to review comments:
+      // POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies
       const escapedReply = reply.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
-      const result = await execPromise(
-        `gh api repos/${this.repoOwner}/${this.repoName}/pulls/${this.prNumber}/comments -f body="${escapedReply}" -F in_reply_to=${commentId}`
+      await execPromise(
+        `gh api -X POST repos/${this.repoOwner}/${this.repoName}/pulls/${this.prNumber}/comments/${commentId}/replies -f body="${escapedReply}"`
       )
 
       this.log(`✅ Replied to comment ${commentId}`)
@@ -292,20 +299,50 @@ I will automatically:
     this.log(`✔️  Resolving comment ${commentId}...`)
 
     try {
-      // GitHub's review thread resolution requires GraphQL API
-      // First, we need the node_id from the comment (it's in the comment object)
-      const nodeId = comment.node_id
+      // Step 1: Get the thread ID for this comment using GraphQL
+      // We need the THREAD's node_id, not the comment's node_id
+      const threadQuery = `
+        query {
+          repository(owner: "${this.repoOwner}", name: "${this.repoName}") {
+            pullRequest(number: ${this.prNumber}) {
+              reviewThreads(first: 100) {
+                nodes {
+                  id
+                  comments(first: 1) {
+                    nodes {
+                      databaseId
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `
 
-      if (!nodeId) {
-        this.log('Warning: Comment node_id not found, cannot resolve thread', 'warn')
+      const escapedThreadQuery = threadQuery.replace(/"/g, '\\"').replace(/\n/g, ' ')
+      const { stdout: threadResult } = await execPromise(
+        `gh api graphql -f query="${escapedThreadQuery}"`
+      )
+
+      const threadData = JSON.parse(threadResult)
+      const threads = threadData?.data?.repository?.pullRequest?.reviewThreads?.nodes || []
+
+      // Find the thread that contains this comment
+      const thread = threads.find(t => t.comments?.nodes?.[0]?.databaseId === commentId)
+
+      if (!thread) {
+        this.log(`Warning: Could not find thread for comment ${commentId}`, 'warn')
         return false
       }
 
-      // Use GraphQL to resolve the review thread
-      // The mutation requires the thread ID, which we can get from the comment's pull_request_review_id
-      const graphqlQuery = `
+      const threadId = thread.id
+      this.log(`Found thread ID: ${threadId}`)
+
+      // Step 2: Resolve the thread using the correct thread ID
+      const resolveQuery = `
         mutation {
-          resolveReviewThread(input: {threadId: "${nodeId}"}) {
+          resolveReviewThread(input: {threadId: "${threadId}"}) {
             thread {
               isResolved
             }
@@ -313,9 +350,9 @@ I will automatically:
         }
       `
 
-      const escapedQuery = graphqlQuery.replace(/"/g, '\\"').replace(/\n/g, ' ')
+      const escapedResolveQuery = resolveQuery.replace(/"/g, '\\"').replace(/\n/g, ' ')
       await execPromise(
-        `gh api graphql -f query="${escapedQuery}"`
+        `gh api graphql -f query="${escapedResolveQuery}"`
       )
 
       this.log(`✅ Resolved comment thread ${commentId}`)
@@ -326,7 +363,7 @@ I will automatically:
       // Fallback: Add a reaction to indicate we've addressed it
       try {
         await execPromise(
-          `gh api repos/${this.repoOwner}/${this.repoName}/pulls/comments/${commentId}/reactions -f content="+1"`
+          `gh api -X POST repos/${this.repoOwner}/${this.repoName}/pulls/comments/${commentId}/reactions -f content="+1"`
         )
         this.log(`✅ Added reaction to comment ${commentId} (resolution fallback)`)
       } catch (reactionError) {
