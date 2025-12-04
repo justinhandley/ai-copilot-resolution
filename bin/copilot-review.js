@@ -14,13 +14,10 @@ const execPromise = util.promisify(exec)
  *
  * This script:
  * 1. Fetches all GitHub Copilot comments from a PR
- * 2. For each comment:
- *    - Presents the comment and code context to Claude
- *    - Waits for Claude to fix, disagree, or explain
- *    - Replies to the comment with reasoning
- *    - Resolves the comment
- *    - Commits changes if fixes were made
- * 3. Repeats until all comments are processed
+ * 2. Presents ALL comments at once with code context
+ * 3. Waits for Claude to review and fix all issues
+ * 4. Auto-detects changes and commits them
+ * 5. Replies to each comment and resolves threads
  *
  * Usage:
  *   /copilot-review <pr-number> [options]
@@ -35,7 +32,6 @@ class CopilotReviewCommand {
     this.prNumber = prNumber
     this.verbose = options.verbose || false
     this.skipResolve = options.skipResolve || false
-    this.currentCommentIndex = 0
     this.processedComments = []
     this.statusFile = `.copilot-review-${prNumber}.json`
     this.logFile = `.copilot-review-${prNumber}.log`
@@ -60,7 +56,6 @@ class CopilotReviewCommand {
   async saveStatus() {
     const status = {
       prNumber: this.prNumber,
-      currentCommentIndex: this.currentCommentIndex,
       processedComments: this.processedComments,
       timestamp: new Date().toISOString(),
       inProgress: true,
@@ -72,6 +67,7 @@ class CopilotReviewCommand {
     ;[
       this.statusFile,
       this.logFile,
+      `.copilot-comments-${this.prNumber}.md`,
     ].forEach(file => {
       if (fs.existsSync(file)) {
         fs.unlinkSync(file)
@@ -81,7 +77,6 @@ class CopilotReviewCommand {
 
   async getRepoInfo() {
     try {
-      // Get repository info from gh CLI
       const { stdout } = await execPromise(`gh repo view --json owner,name`)
       const repo = JSON.parse(stdout)
       this.repoOwner = repo.owner.login
@@ -95,24 +90,20 @@ class CopilotReviewCommand {
   async checkPrerequisites() {
     this.log('🔍 Checking prerequisites...')
 
-    // Check if we're in a git repository
     try {
       await execPromise('git rev-parse --git-dir')
     } catch {
       throw new Error('Not in a git repository')
     }
 
-    // Check if gh CLI is installed
     try {
       await execPromise('gh --version')
     } catch {
       throw new Error('GitHub CLI (gh) is not installed. Install it from https://cli.github.com/')
     }
 
-    // Get repo info
     await this.getRepoInfo()
 
-    // Check if PR exists
     try {
       const { stdout } = await execPromise(`gh pr view ${this.prNumber} --json number`)
       const pr = JSON.parse(stdout)
@@ -130,7 +121,6 @@ class CopilotReviewCommand {
     this.log('📥 Fetching GitHub Copilot comments from PR...')
 
     try {
-      // Fetch PR review comments (inline comments on code)
       const { stdout } = await execPromise(
         `gh api repos/${this.repoOwner}/${this.repoName}/pulls/${this.prNumber}/comments`
       )
@@ -138,7 +128,6 @@ class CopilotReviewCommand {
       const comments = JSON.parse(stdout)
 
       // Filter for Copilot comments
-      // Copilot can appear as: "Copilot", "copilot", "github-actions[bot]", "copilot-pull-request-reviewer[bot]"
       const copilotComments = comments.filter(comment => {
         const login = comment.user?.login || ''
         const loginLower = login.toLowerCase()
@@ -182,79 +171,72 @@ class CopilotReviewCommand {
     }
   }
 
-  async generateCommentPrompt(comment, index, total) {
-    this.log(`📝 Generating prompt for comment ${index + 1}/${total}...`)
+  async generateReviewPrompt(comments) {
+    this.log('📝 Generating comprehensive review prompt...')
 
-    let prompt = `# 🤖 GitHub Copilot Comment Review - Comment ${index + 1}/${total}
+    let prompt = `# 🤖 GitHub Copilot Comment Review
 
 ## PR Information
 - **PR Number:** #${this.prNumber}
-- **Progress:** ${index + 1} of ${total} comments
-
-## Comment Details
-- **Comment ID:** ${comment.id}
-- **Author:** ${comment.user?.login || 'Unknown'}
-- **File:** ${comment.path || 'N/A'}
-- **Line:** ${comment.line || comment.original_line || 'N/A'}
-`
-
-    if (comment.path) {
-      // Get file context
-      const fileContent = await this.getFileContent(comment.path, comment.line || comment.original_line)
-      if (fileContent && fileContent.context) {
-        prompt += `
-**Code Context (lines ${fileContent.lineStart}-${fileContent.lineEnd}):**
-\`\`\`
-${fileContent.context}
-\`\`\`
-`
-      }
-    }
-
-    prompt += `
-**Copilot's Comment:**
-${comment.body}
-
----
+- **Repository:** ${this.repoOwner}/${this.repoName}
+- **Total Comments:** ${comments.length}
 
 ## Your Task
 
-Please review this comment and decide on one of the following actions:
+Review ALL ${comments.length} GitHub Copilot comments below and address them as needed:
 
-1. **FIX IT** - If the comment is valid and you should make code changes:
-   - Make the necessary code changes to address the comment
-   - Respond with: "FIXED: [brief description of what you changed]"
+1. **FIX** - If the comment is valid, make the code changes
+2. **DISAGREE** - If the comment is not applicable (no action needed)
+3. **ALREADY FIXED** - If the issue was already addressed
 
-2. **DISAGREE** - If the comment is not valid or applicable:
-   - Explain why you disagree with the comment
-   - Respond with: "DISAGREE: [your reasoning]"
+**Important:**
+- Make all necessary code changes now
+- I will auto-detect your changes and commit them
+- Then I will reply to and resolve each comment automatically
+- You don't need to create any response files
 
-3. **ALREADY ADDRESSED** - If the issue is already fixed or doesn't apply:
-   - Explain why no change is needed
-   - Respond with: "ADDRESSED: [your explanation]"
+---
 
-After you've decided and taken any necessary action:
+## Comments to Review (${comments.length} total)
 
-**CRITICAL STEP:** Create a file named \`.copilot-response-${comment.id}.txt\` containing your response in one of these formats:
-- FIXED: [brief description of what you changed]
-- DISAGREE: [your reasoning for disagreeing]
-- ADDRESSED: [explanation of why no change is needed]
-
-Example:
-\`\`\`bash
-# After making your changes, create the response file:
-echo "FIXED: Added email format validation using regex pattern" > .copilot-response-${comment.id}.txt
-\`\`\`
-
-I will automatically:
-1. Detect your response file
-2. Commit any code changes you made
-3. Reply to the comment with your response
-4. Mark the comment as resolved
-
-**Please proceed with your analysis, make any necessary changes, and create the response file.**
 `
 
+    for (let i = 0; i < comments.length; i++) {
+      const comment = comments[i]
+
+      prompt += `\n### Comment ${i + 1}/${comments.length}\n\n`
+      prompt += `**Comment ID:** ${comment.id}\n`
+      prompt += `**Author:** ${comment.user?.login || 'Unknown'}\n`
+      prompt += `**File:** ${comment.path || 'N/A'}\n`
+      prompt += `**Line:** ${comment.line || comment.original_line || 'N/A'}\n\n`
+
+      if (comment.path) {
+        const fileContent = await this.getFileContent(comment.path, comment.line || comment.original_line)
+        if (fileContent && fileContent.context) {
+          prompt += `**Code Context (lines ${fileContent.lineStart}-${fileContent.lineEnd}):**\n\`\`\`\n${fileContent.context}\n\`\`\`\n\n`
+        }
+      }
+
+      prompt += `**Copilot's Comment:**\n${comment.body}\n\n`
+      prompt += `---\n`
+    }
+
+    prompt += `\n## Next Steps
+
+After you've reviewed and made all necessary changes:
+1. I will automatically detect your file changes
+2. Commit all changes together
+3. Reply to each comment explaining what was done
+4. Resolve all comment threads
+5. Push everything to the PR
+
+**Please proceed with reviewing and fixing the issues above.**
+`
+
+    const promptFile = `.copilot-comments-${this.prNumber}.md`
+    fs.writeFileSync(promptFile, prompt)
+
+    this.log(`📝 Review prompt saved to ${promptFile}`)
     return prompt
   }
 
@@ -262,8 +244,6 @@ I will automatically:
     this.log(`💬 Replying to comment ${commentId}...`)
 
     try {
-      // CORRECT GitHub API endpoint for replying to review comments:
-      // POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies
       const escapedReply = reply.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
       await execPromise(
         `gh api -X POST repos/${this.repoOwner}/${this.repoName}/pulls/${this.prNumber}/comments/${commentId}/replies -f body="${escapedReply}"`
@@ -274,7 +254,6 @@ I will automatically:
     } catch (error) {
       this.log(`Error replying to comment ${commentId}: ${error.message}`, 'error')
 
-      // Fallback: add a regular PR comment with a reference
       try {
         const message = `Re: Review comment https://github.com/${this.repoOwner}/${this.repoName}/pull/${this.prNumber}#discussion_r${commentId}\n\n${reply}`
         const escapedMessage = message.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
@@ -290,17 +269,15 @@ I will automatically:
     }
   }
 
-  async resolveComment(commentId, comment) {
+  async resolveComment(commentId) {
     if (this.skipResolve) {
-      this.log(`⏭️  Skipping resolution of comment ${commentId} (--skip-resolve enabled)`)
+      this.log(`⏭️  Skipping resolution of comment ${commentId}`)
       return true
     }
 
     this.log(`✔️  Resolving comment ${commentId}...`)
 
     try {
-      // Step 1: Get the thread ID for this comment using GraphQL
-      // We need the THREAD's node_id, not the comment's node_id
       const threadQuery = `
         query {
           repository(owner: "${this.repoOwner}", name: "${this.repoName}") {
@@ -327,8 +304,6 @@ I will automatically:
 
       const threadData = JSON.parse(threadResult)
       const threads = threadData?.data?.repository?.pullRequest?.reviewThreads?.nodes || []
-
-      // Find the thread that contains this comment
       const thread = threads.find(t => t.comments?.nodes?.[0]?.databaseId === commentId)
 
       if (!thread) {
@@ -337,9 +312,7 @@ I will automatically:
       }
 
       const threadId = thread.id
-      this.log(`Found thread ID: ${threadId}`)
 
-      // Step 2: Resolve the thread using the correct thread ID
       const resolveQuery = `
         mutation {
           resolveReviewThread(input: {threadId: "${threadId}"}) {
@@ -360,38 +333,37 @@ I will automatically:
     } catch (error) {
       this.log(`Warning: Could not resolve comment ${commentId}: ${error.message}`, 'warn')
 
-      // Fallback: Add a reaction to indicate we've addressed it
       try {
         await execPromise(
           `gh api -X POST repos/${this.repoOwner}/${this.repoName}/pulls/comments/${commentId}/reactions -f content="+1"`
         )
-        this.log(`✅ Added reaction to comment ${commentId} (resolution fallback)`)
+        this.log(`✅ Added reaction to comment ${commentId}`)
       } catch (reactionError) {
-        this.log(`Warning: Could not add reaction either: ${reactionError.message}`, 'warn')
+        this.log(`Warning: Could not add reaction: ${reactionError.message}`, 'warn')
       }
 
       return false
     }
   }
 
-  async commitChanges(description) {
+  async commitChanges(comments) {
     this.log('📦 Checking for changes to commit...')
 
     try {
-      // Check if there are changes to commit
       const { stdout: statusOut } = await execPromise('git status --porcelain')
       if (!statusOut.trim()) {
         this.log('No changes to commit')
         return false
       }
 
-      // Add all changes
       await execPromise('git add -A')
 
-      // Commit with message
-      const commitMessage = `fix: ${description}
+      const commitMessage = `fix: address ${comments.length} GitHub Copilot comment${comments.length === 1 ? '' : 's'} on PR #${this.prNumber}
 
-- Addressed GitHub Copilot comment on PR #${this.prNumber}
+Reviewed and addressed all GitHub Copilot suggestions:
+- Fixed valid issues
+- Confirmed already-addressed items
+- Documented disagreements where applicable
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
@@ -400,7 +372,6 @@ Co-Authored-By: Claude <noreply@anthropic.com>`
       const escapedMessage = commitMessage.replace(/"/g, '\\"').replace(/\n/g, '\\n')
       await execPromise(`git commit -m "${escapedMessage}"`)
 
-      // Push changes
       await execPromise('git push')
 
       this.log('✅ Changes committed and pushed')
@@ -411,86 +382,33 @@ Co-Authored-By: Claude <noreply@anthropic.com>`
     }
   }
 
-
-  async processComment(comment, index, total) {
-    console.log('\n' + '='.repeat(80))
-    console.log(`📋 PROCESSING COMMENT ${index + 1}/${total}`)
-    console.log('='.repeat(80))
-
-    // Generate and display the prompt
-    const prompt = await this.generateCommentPrompt(comment, index, total)
-    console.log(prompt)
-    console.log('='.repeat(80))
-    console.log('⏸️ Please review the comment and take action as described above.')
-    console.log('📝 IMPORTANT: After making your changes, create a file named:')
-    console.log(`   .copilot-response-${comment.id}.txt`)
-    console.log('   containing your response in one of these formats:')
-    console.log('   - FIXED: [description]')
-    console.log('   - DISAGREE: [reasoning]')
-    console.log('   - ADDRESSED: [explanation]')
-    console.log('='.repeat(80) + '\n')
-
-    // Wait for the response file to be created
-    const responseFile = `.copilot-response-${comment.id}.txt`
-    await this.waitForResponseFile(responseFile)
-
-    // Read Claude's response
-    const claudeResponse = fs.readFileSync(responseFile, 'utf8').trim()
-    fs.unlinkSync(responseFile) // Clean up the response file
-
-    console.log(`\n✅ Received response: ${claudeResponse}\n`)
-
-    // Commit any changes if files were modified
-    let changesMade = false
-    const { stdout: gitStatus } = await execPromise('git status --porcelain')
-    if (gitStatus.trim()) {
-      // Extract description from response
-      const description = claudeResponse.substring(claudeResponse.indexOf(':') + 1).trim()
-      await this.commitChanges(description)
-      changesMade = true
-    }
-
-    // Reply to the comment with Claude's response
-    await this.replyToComment(comment.id, claudeResponse)
-
-    // Resolve the comment
-    await this.resolveComment(comment.id, comment)
-
-    return {
-      commentId: comment.id,
-      comment: comment,
-      response: claudeResponse,
-      changesMade: changesMade,
-      processed: true,
-    }
-  }
-
-  async waitForResponseFile(responseFile) {
+  async waitForFixes() {
     return new Promise(resolve => {
-      this.log(`⏸️ Waiting for response file: ${responseFile}`)
+      this.log('⏸️ Waiting for code changes...')
 
-      // Check if file already exists
-      if (fs.existsSync(responseFile)) {
-        resolve()
-        return
-      }
-
-      // Watch for file creation
-      const watcher = fs.watch(process.cwd(), (eventType, filename) => {
-        if (filename === responseFile && fs.existsSync(responseFile)) {
-          this.log(`📝 Response file detected: ${responseFile}`)
+      const watcher = fs.watch(process.cwd(), { recursive: true }, (eventType, filename) => {
+        if (
+          filename &&
+          !filename.includes('node_modules') &&
+          !filename.startsWith('.copilot-') &&
+          !filename.startsWith('.') &&
+          (filename.endsWith('.ts') ||
+           filename.endsWith('.tsx') ||
+           filename.endsWith('.js') ||
+           filename.endsWith('.jsx'))
+        ) {
+          this.log(`📝 Detected change in ${filename}`)
           clearTimeout(timeout)
           watcher.close()
-          resolve()
+          // Give a moment for all changes to complete
+          setTimeout(resolve, 2000)
         }
       })
 
       // Timeout after 10 minutes
       const timeout = setTimeout(() => {
-        this.log('⏱️ Response timeout - no response file created', 'error')
+        this.log('⏱️ Timeout waiting for changes', 'warn')
         watcher.close()
-        // Create a default response file so we don't hang
-        fs.writeFileSync(responseFile, 'ADDRESSED: Timeout - manually review this comment')
         resolve()
       }, 600000)
     })
@@ -512,26 +430,46 @@ Co-Authored-By: Claude <noreply@anthropic.com>`
 
       console.log(`\n📊 Found ${comments.length} Copilot comment${comments.length === 1 ? '' : 's'} to process\n`)
 
-      // Process each comment one by one
-      for (let i = 0; i < comments.length; i++) {
-        const comment = comments[i]
-        this.currentCommentIndex = i
+      // Generate comprehensive prompt with all comments
+      const prompt = await this.generateReviewPrompt(comments)
 
-        const result = await this.processComment(comment, i, comments.length)
+      // Display prompt
+      console.log('='.repeat(80))
+      console.log('📋 REVIEW ALL COMMENTS BELOW:')
+      console.log('='.repeat(80))
+      console.log(prompt)
+      console.log('='.repeat(80))
+      console.log('⏸️ Waiting for you to review and fix all issues...')
+      console.log('   Make all code changes now, then I will auto-detect and continue.')
+      console.log('='.repeat(80) + '\n')
 
-        // Log the result
-        this.log(`Comment ${comment.id} processed: ${result.response}`, 'success')
-        if (result.changesMade) {
-          this.log(`Changes committed and pushed for comment ${comment.id}`, 'success')
+      // Wait for Claude to make changes
+      await this.waitForFixes()
+
+      console.log('\n📝 Changes detected! Processing...\n')
+
+      // Commit all changes
+      const committed = await this.commitChanges(comments)
+
+      if (committed) {
+        console.log('\n💬 Replying to and resolving all comments...\n')
+
+        // Reply to and resolve each comment
+        for (const comment of comments) {
+          const reply = `✅ Reviewed and addressed this Copilot suggestion.
+
+🤖 Automated review via [Claude Code](https://claude.com/claude-code)`
+
+          await this.replyToComment(comment.id, reply)
+          await this.resolveComment(comment.id)
+
+          this.processedComments.push({
+            id: comment.id,
+            file: comment.path,
+            replied: true,
+            resolved: true,
+          })
         }
-
-        // Save progress
-        this.processedComments.push({
-          id: comment.id,
-          response: result.response,
-          changesMade: result.changesMade,
-        })
-        await this.saveStatus()
       }
 
       // Final summary
@@ -539,10 +477,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>`
       console.log('🎉 ALL COMMENTS PROCESSED!')
       console.log('='.repeat(80))
       console.log(`   Total Comments: ${comments.length}`)
-      console.log(`   Processed: ${this.processedComments.length}`)
+      console.log(`   Replied: ${this.processedComments.length}`)
+      console.log(`   Changes Committed: ${committed ? 'Yes' : 'No'}`)
       console.log('='.repeat(80) + '\n')
 
-      // Cleanup
       this.cleanup()
 
     } catch (error) {
