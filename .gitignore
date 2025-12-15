@@ -5,10 +5,14 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Runtime files
+# Runtime files (temp directory for review tools)
+.temp-review/
+
+# Legacy runtime files (for backwards compatibility)
 .copilot-review-*.md
 .copilot-review-*.json
 .copilot-review-*.log
+.copilot-comments-*.md
 
 # IDE
 .vscode/

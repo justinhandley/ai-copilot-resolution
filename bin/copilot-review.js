@@ -33,13 +33,22 @@ class CopilotReviewCommand {
     this.verbose = options.verbose || false
     this.skipResolve = options.skipResolve || false
     this.processedComments = []
-    this.statusFile = `.copilot-review-${prNumber}.json`
-    this.logFile = `.copilot-review-${prNumber}.log`
+
+    // Use a temp directory for all generated files
+    this.tempDir = '.temp-review'
+    this.statusFile = path.join(this.tempDir, `review-${prNumber}.json`)
+    this.logFile = path.join(this.tempDir, `review-${prNumber}.log`)
+    this.promptFile = path.join(this.tempDir, `comments-${prNumber}.md`)
     this.repoOwner = null
     this.repoName = null
 
     // Clean up any previous runs
     this.cleanup()
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(this.tempDir)) {
+      fs.mkdirSync(this.tempDir, { recursive: true })
+    }
   }
 
   log(message, level = 'info') {
@@ -64,11 +73,26 @@ class CopilotReviewCommand {
   }
 
   cleanup() {
-    ;[
-      this.statusFile,
-      this.logFile,
+    // Delete all files in the temp directory and remove it
+    if (fs.existsSync(this.tempDir)) {
+      const files = fs.readdirSync(this.tempDir)
+      files.forEach(file => {
+        const filePath = path.join(this.tempDir, file)
+        fs.unlinkSync(filePath)
+      })
+      fs.rmdirSync(this.tempDir)
+      if (this.verbose) {
+        console.log('🧹 Cleaned up all temporary files')
+      }
+    }
+
+    // Also clean up any legacy files from old versions
+    const legacyFiles = [
+      `.copilot-review-${this.prNumber}.json`,
+      `.copilot-review-${this.prNumber}.log`,
       `.copilot-comments-${this.prNumber}.md`,
-    ].forEach(file => {
+    ]
+    legacyFiles.forEach(file => {
       if (fs.existsSync(file)) {
         fs.unlinkSync(file)
       }
@@ -229,14 +253,16 @@ After you've reviewed and made all necessary changes:
 3. Reply to each comment explaining what was done
 4. Resolve all comment threads
 5. Push everything to the PR
+6. **Delete all temporary files** (logs, JSON, and this prompt file will be auto-cleaned)
+
+**Important Cleanup:** All temporary files are stored in the \`.temp-review/\` directory and will be automatically deleted after the run completes. Do not manually create or modify files in this directory.
 
 **Please proceed with reviewing and fixing the issues above.**
 `
 
-    const promptFile = `.copilot-comments-${this.prNumber}.md`
-    fs.writeFileSync(promptFile, prompt)
+    fs.writeFileSync(this.promptFile, prompt)
 
-    this.log(`📝 Review prompt saved to ${promptFile}`)
+    this.log(`📝 Review prompt saved to ${this.promptFile}`)
     return prompt
   }
 
@@ -390,7 +416,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>`
         if (
           filename &&
           !filename.includes('node_modules') &&
-          !filename.startsWith('.copilot-') &&
+          !filename.startsWith('.temp-review') &&
           !filename.startsWith('.') &&
           (filename.endsWith('.ts') ||
            filename.endsWith('.tsx') ||
